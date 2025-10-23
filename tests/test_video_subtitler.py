@@ -71,8 +71,9 @@ class TestExtractAudio:
             output_path = tmp.name
 
         try:
-            result = video_subtitler.extract_audio(str(sample_video), output_path)
-            assert result is True
+            success, duration = video_subtitler.extract_audio(str(sample_video), output_path)
+            assert success is True
+            assert duration > 0
             assert os.path.exists(output_path)
             assert os.path.getsize(output_path) > 0
         finally:
@@ -85,8 +86,9 @@ class TestExtractAudio:
             output_path = tmp.name
 
         try:
-            result = video_subtitler.extract_audio("nonexistent.mp4", output_path)
-            assert result is False
+            success, duration = video_subtitler.extract_audio("nonexistent.mp4", output_path)
+            assert success is False
+            assert duration == 0
         finally:
             if os.path.exists(output_path):
                 os.remove(output_path)
@@ -98,9 +100,9 @@ class TestExtractAudio:
 
         try:
             # This should handle the case gracefully
-            result = video_subtitler.extract_audio(str(silent_video), output_path)
+            success, duration = video_subtitler.extract_audio(str(silent_video), output_path)
             # Result may be False if video has no audio
-            assert result is False or os.path.exists(output_path)
+            assert success is False or os.path.exists(output_path)
         finally:
             if os.path.exists(output_path):
                 os.remove(output_path)
@@ -323,7 +325,7 @@ class TestTranscription:
         # Extract audio for testing
         tmpdir = tmp_path_factory.mktemp("audio")
         audio_path = tmpdir / "test_audio.wav"
-        video_subtitler.extract_audio(str(video_path), str(audio_path))
+        success, duration = video_subtitler.extract_audio(str(video_path), str(audio_path))
         return audio_path
 
     @pytest.mark.slow

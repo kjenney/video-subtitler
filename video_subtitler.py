@@ -34,33 +34,56 @@ def extract_audio(video_path, output_audio_path):
     print(f"Extracting audio from {video_path}...")
     try:
         video = VideoFileClip(video_path)
-        video.audio.write_audiofile(output_audio_path)
+        duration = video.duration
+
+        # Warn for long videos
+        if duration > 600:  # 10 minutes
+            print(f"Long video detected ({duration/60:.1f} minutes). This may take a while...")
+
+        video.audio.write_audiofile(output_audio_path, logger=None)
         video.close()
-        print(f"Audio extracted to {output_audio_path}")
-        return True
+        print(f"Audio extracted to {output_audio_path} (duration: {duration:.1f}s)")
+        return True, duration
     except Exception as e:
         print(f"Error extracting audio: {e}")
-        return False
+        return False, 0
 
 
-def transcribe_audio(audio_path, model_name="base", language=None):
-    """Transcribe audio using Whisper"""
+def transcribe_audio(audio_path, model_name="small", language=None, no_speech_threshold=0.3, temperature=0.5):
+    """Transcribe audio using Whisper
+
+    Args:
+        audio_path: Path to audio file
+        model_name: Whisper model size
+        language: Language code
+        no_speech_threshold: Lower values (0.2-0.4) are more sensitive to soft voices (default: 0.3)
+        temperature: Sampling temperature for unusual audio (default: 0.5)
+    """
     print(f"Loading Whisper model '{model_name}'...")
     model = whisper.load_model(model_name)
 
-    print(f"Transcribing audio...")
+    print(f"Transcribing audio (sensitivity: {no_speech_threshold})...")
     result = model.transcribe(
         audio_path,
         language=language,
         verbose=False,
-        word_timestamps=True
+        word_timestamps=True,
+        no_speech_threshold=no_speech_threshold,
+        temperature=temperature,
+        best_of=10  # Increase quality for better soft voice detection
     )
 
     return result
 
 
-def generate_srt(segments, output_path):
-    """Generate SRT subtitle file from transcription segments"""
+def generate_srt(segments, output_path, video_duration=None):
+    """Generate SRT subtitle file from transcription segments
+
+    Args:
+        segments: Transcription segments
+        output_path: Output file path
+        video_duration: Total video duration in seconds for validation
+    """
     print(f"Generating subtitle file: {output_path}")
 
     with open(output_path, 'w', encoding='utf-8') as f:
@@ -73,7 +96,19 @@ def generate_srt(segments, output_path):
             f.write(f"{start_time} --> {end_time}\n")
             f.write(f"{text}\n\n")
 
-    print(f"Subtitle file created successfully!")
+    # Validate transcription coverage
+    if video_duration and segments:
+        last_segment_end = segments[-1]['end']
+        coverage = (last_segment_end / video_duration) * 100
+
+        print(f"Subtitle file created successfully!")
+        print(f"Transcription coverage: {coverage:.1f}% ({last_segment_end:.1f}s / {video_duration:.1f}s)")
+
+        if coverage < 95:
+            print(f"WARNING: Transcription may be incomplete! Only covered {coverage:.1f}% of video.")
+            print(f"Try using: --sensitivity 0.2 or --model medium for better results")
+    else:
+        print(f"Subtitle file created successfully!")
 
 
 def main():
@@ -93,14 +128,26 @@ def main():
     parser.add_argument(
         "-m", "--model",
         type=str,
-        default="base",
+        default="small",
         choices=["tiny", "base", "small", "medium", "large"],
-        help="Whisper model size (default: base). Larger models are more accurate but slower"
+        help="Whisper model size (default: small). Larger models are more accurate but slower"
     )
     parser.add_argument(
         "-l", "--language",
         type=str,
         help="Language code (e.g., 'en', 'es', 'fr'). Auto-detect if not specified"
+    )
+    parser.add_argument(
+        "--sensitivity",
+        type=float,
+        default=0.3,
+        help="Voice detection sensitivity (0.2-0.4). Lower values catch softer voices (default: 0.3)"
+    )
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=0.5,
+        help="Transcription temperature for unusual audio (default: 0.5)"
     )
     parser.add_argument(
         "--keep-audio",
@@ -128,14 +175,15 @@ def main():
 
     try:
         # Step 1: Extract audio
-        if not extract_audio(str(video_path), temp_audio_path):
+        success, video_duration = extract_audio(str(video_path), temp_audio_path)
+        if not success:
             sys.exit(1)
 
         # Step 2: Transcribe audio
-        result = transcribe_audio(temp_audio_path, args.model, args.language)
+        result = transcribe_audio(temp_audio_path, args.model, args.language, args.sensitivity, args.temperature)
 
         # Step 3: Generate SRT file
-        generate_srt(result['segments'], str(output_path))
+        generate_srt(result['segments'], str(output_path), video_duration)
 
         print(f"\nSuccess! Subtitles saved to: {output_path}")
 
