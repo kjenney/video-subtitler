@@ -6,6 +6,10 @@ A Python script that extracts audio from video files and generates subtitles usi
 
 - Extracts audio from any video format supported by moviepy
 - Uses Whisper AI for accurate speech-to-text transcription
+- **Audio preprocessing** to improve transcription quality:
+  - Audio normalization to even out volume levels
+  - Dynamic range compression to boost quiet sections
+  - Noise reduction to remove background noise
 - Generates industry-standard SRT subtitle files
 - Supports multiple languages with auto-detection
 - Multiple model sizes for speed/accuracy tradeoff
@@ -73,14 +77,20 @@ python video_subtitler.py path/to/video.mp4 -o output.srt -m small -l en
 
 - `video_path` (required): Path to the input video file
 - `-o, --output`: Output subtitle file path (default: same name as video with .srt extension)
-- `-m, --model`: Whisper model size (default: base)
+- `-m, --model`: Whisper model size (default: small)
   - `tiny`: Fastest, least accurate (~1GB RAM)
-  - `base`: Good balance (default, ~1GB RAM)
-  - `small`: Better accuracy (~2GB RAM)
+  - `base`: Good balance (~1GB RAM)
+  - `small`: Better accuracy (default, ~2GB RAM)
   - `medium`: High accuracy (~5GB RAM)
   - `large`: Best accuracy (~10GB RAM)
 - `-l, --language`: Language code (e.g., 'en', 'es', 'fr', 'de'). Auto-detects if not specified
-- `--keep-audio`: Keep the extracted audio file
+- `--sensitivity`: Voice detection sensitivity (0.2-0.4). Lower values catch softer voices (default: 0.3)
+- `--temperature`: Transcription temperature for unusual audio (default: 0.5)
+- `--preprocess`: Enable audio preprocessing (normalization, compression, and noise reduction)
+- `--no-normalize`: Disable audio normalization (when --preprocess is enabled)
+- `--no-compress`: Disable dynamic range compression (when --preprocess is enabled)
+- `--no-denoise`: Disable noise reduction (when --preprocess is enabled)
+- `--keep-audio`: Keep the extracted audio file(s)
 
 ### Examples
 
@@ -102,6 +112,21 @@ python video_subtitler.py lecture.mp4 -o subtitles/lecture_en.srt -l en
 Keep the extracted audio file:
 ```bash
 python video_subtitler.py video.mp4 --keep-audio
+```
+
+Process video with quiet or uneven audio (recommended for lectures, podcasts):
+```bash
+python video_subtitler.py lecture.mp4 --preprocess
+```
+
+Preprocess with only noise reduction (skip normalization and compression):
+```bash
+python video_subtitler.py podcast.mp4 --preprocess --no-normalize --no-compress
+```
+
+Combine preprocessing with higher sensitivity for very quiet audio:
+```bash
+python video_subtitler.py quiet_video.mp4 --preprocess --sensitivity 0.2 -m medium
 ```
 
 ## Output Format
@@ -159,6 +184,41 @@ pytest -m "not slow"
 - `tests/create_sample_videos.py` - Creates small sample videos for testing
 - `pytest.ini` - Pytest configuration
 
+## Audio Preprocessing
+
+The `--preprocess` flag enables audio enhancement before transcription, which can significantly improve subtitle quality for videos with:
+- Quiet or soft-spoken audio
+- Uneven volume levels
+- Background noise or hiss
+- Poor recording quality
+
+### How It Works
+
+1. **Noise Reduction**: Uses spectral gating to remove background noise and hiss
+2. **Audio Normalization**: Applies EBU R128 loudness normalization to standardize volume levels
+3. **Dynamic Range Compression**: Boosts quiet sections and compresses loud sections for more consistent audio
+
+### When to Use Preprocessing
+
+**Recommended for:**
+- Lectures and presentations
+- Podcasts with varying speaker volumes
+- Home recordings or amateur videos
+- Videos with background noise
+- Quiet or soft-spoken content
+
+**Not necessary for:**
+- Professional studio recordings
+- Videos with already high-quality audio
+- Content that already has good, consistent volume
+
+### Tips
+
+- Combine `--preprocess` with `--sensitivity 0.2` for best results with very quiet audio
+- Use `--keep-audio` to save both original and preprocessed audio files for comparison
+- Preprocessing adds 10-30 seconds to processing time depending on video length
+- You can disable individual preprocessing steps with `--no-normalize`, `--no-compress`, or `--no-denoise`
+
 ## Troubleshooting
 
 **Error: ffmpeg not found**
@@ -170,6 +230,13 @@ pytest -m "not slow"
 **Poor transcription quality**
 - Try a larger model (e.g., `-m medium` or `-m large`)
 - Specify the correct language with `-l` option
+- **For quiet or uneven audio**: Use `--preprocess` flag
+- **For very quiet audio**: Combine `--preprocess --sensitivity 0.2`
+
+**Missing subtitles for parts of the video**
+- Use `--preprocess` to normalize audio levels
+- Try `--sensitivity 0.2` for softer voices
+- Use a larger model with `-m medium` or `-m large`
 
 ## License
 

@@ -13,6 +13,10 @@ from datetime import timedelta
 try:
     import whisper
     from moviepy import VideoFileClip
+    import ffmpeg
+    import numpy as np
+    import noisereduce as nr
+    import scipy.io.wavfile as wavfile
 except ImportError as e:
     print(f"Error: Required package not found: {e}")
     print("Please install required packages: pip install -r requirements.txt")
@@ -47,6 +51,118 @@ def extract_audio(video_path, output_audio_path):
     except Exception as e:
         print(f"Error extracting audio: {e}")
         return False, 0
+
+
+def preprocess_audio(input_path, output_path, normalize=True, compress=True, denoise=True):
+    """Preprocess audio to improve transcription quality
+
+    Args:
+        input_path: Path to input audio file
+        output_path: Path to save processed audio
+        normalize: Apply audio normalization to even out volume levels
+        compress: Apply dynamic range compression to boost quiet sections
+        denoise: Apply noise reduction to remove background noise
+
+    Returns:
+        bool: True if preprocessing succeeded, False otherwise
+    """
+    try:
+        if not normalize and not compress and not denoise:
+            # No preprocessing requested, just copy the file
+            print("Skipping audio preprocessing...")
+            return True
+
+        print("Preprocessing audio to improve transcription quality...")
+
+        # Read the audio file
+        sample_rate, audio_data = wavfile.read(input_path)
+
+        # Convert to float32 for processing
+        if audio_data.dtype != np.float32:
+            audio_data = audio_data.astype(np.float32)
+            # Normalize to [-1, 1] range
+            max_val = np.abs(audio_data).max()
+            if max_val > 0:
+                audio_data = audio_data / max_val
+
+        # Apply noise reduction first if requested
+        if denoise:
+            print("  - Applying noise reduction...")
+            # Use the first 1 second as noise profile, or less if audio is shorter
+            noise_duration = min(1.0, len(audio_data) / sample_rate * 0.1)
+            noise_sample_count = int(noise_duration * sample_rate)
+
+            if len(audio_data.shape) == 1:
+                # Mono audio
+                audio_data = nr.reduce_noise(
+                    y=audio_data,
+                    sr=sample_rate,
+                    stationary=True,
+                    prop_decrease=0.8
+                )
+            else:
+                # Stereo audio - process each channel
+                audio_data = np.array([
+                    nr.reduce_noise(y=audio_data[:, i], sr=sample_rate, stationary=True, prop_decrease=0.8)
+                    for i in range(audio_data.shape[1])
+                ]).T
+
+        # Save intermediate file for ffmpeg processing
+        temp_intermediate = output_path + '.temp.wav'
+
+        # Convert back to int16 for saving
+        audio_int16 = (audio_data * 32767).astype(np.int16)
+        wavfile.write(temp_intermediate, sample_rate, audio_int16)
+
+        # Build ffmpeg filter chain
+        filters = []
+
+        if normalize:
+            print("  - Applying audio normalization...")
+            # Use loudnorm filter for EBU R128 loudness normalization
+            filters.append('loudnorm=I=-16:TP=-1.5:LRA=11')
+
+        if compress:
+            print("  - Applying dynamic range compression...")
+            # Compand filter to boost quiet sections and compress loud sections
+            # Format: attack:decay:points:soft-knee:gain:volume:delay
+            filters.append('compand=attacks=0.3:decays=0.8:points=-80/-80|-45/-27|-27/-9|0/-3:soft-knee=6:gain=3:volume=0')
+
+        # Apply filters using ffmpeg
+        if filters:
+            filter_chain = ','.join(filters)
+            try:
+                (
+                    ffmpeg
+                    .input(temp_intermediate)
+                    .filter('aformat', 'channel_layouts=mono|stereo')
+                    .filter_complex(filter_chain)
+                    .output(output_path, acodec='pcm_s16le', ar=16000)
+                    .overwrite_output()
+                    .run(capture_stdout=True, capture_stderr=True, quiet=True)
+                )
+            except ffmpeg.Error as e:
+                print(f"Warning: FFmpeg processing failed: {e.stderr.decode()}")
+                # Fall back to using the denoised audio
+                os.rename(temp_intermediate, output_path)
+        else:
+            os.rename(temp_intermediate, output_path)
+
+        # Clean up temp file if it still exists
+        if os.path.exists(temp_intermediate):
+            os.remove(temp_intermediate)
+
+        print("Audio preprocessing completed successfully!")
+        return True
+
+    except Exception as e:
+        print(f"Warning: Audio preprocessing failed: {e}")
+        print("Continuing with original audio...")
+        # Copy original file if preprocessing fails
+        if input_path != output_path:
+            import shutil
+            shutil.copy(input_path, output_path)
+        return False
 
 
 def transcribe_audio(audio_path, model_name="small", language=None, no_speech_threshold=0.3, temperature=0.5):
@@ -154,6 +270,26 @@ def main():
         action="store_true",
         help="Keep the extracted audio file"
     )
+    parser.add_argument(
+        "--preprocess",
+        action="store_true",
+        help="Enable audio preprocessing (normalization, compression, and noise reduction)"
+    )
+    parser.add_argument(
+        "--no-normalize",
+        action="store_true",
+        help="Disable audio normalization (when --preprocess is enabled)"
+    )
+    parser.add_argument(
+        "--no-compress",
+        action="store_true",
+        help="Disable dynamic range compression (when --preprocess is enabled)"
+    )
+    parser.add_argument(
+        "--no-denoise",
+        action="store_true",
+        help="Disable noise reduction (when --preprocess is enabled)"
+    )
 
     args = parser.parse_args()
 
@@ -169,9 +305,12 @@ def main():
     else:
         output_path = video_path.with_suffix('.srt')
 
-    # Create temporary audio file
+    # Create temporary audio files
     with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp_audio:
         temp_audio_path = tmp_audio.name
+
+    with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp_processed:
+        temp_processed_path = tmp_processed.name
 
     try:
         # Step 1: Extract audio
@@ -179,10 +318,22 @@ def main():
         if not success:
             sys.exit(1)
 
-        # Step 2: Transcribe audio
-        result = transcribe_audio(temp_audio_path, args.model, args.language, args.sensitivity, args.temperature)
+        # Step 2: Preprocess audio (if enabled)
+        audio_to_transcribe = temp_audio_path
+        if args.preprocess:
+            preprocess_audio(
+                temp_audio_path,
+                temp_processed_path,
+                normalize=not args.no_normalize,
+                compress=not args.no_compress,
+                denoise=not args.no_denoise
+            )
+            audio_to_transcribe = temp_processed_path
 
-        # Step 3: Generate SRT file
+        # Step 3: Transcribe audio
+        result = transcribe_audio(audio_to_transcribe, args.model, args.language, args.sensitivity, args.temperature)
+
+        # Step 4: Generate SRT file
         generate_srt(result['segments'], str(output_path), video_duration)
 
         print(f"\nSuccess! Subtitles saved to: {output_path}")
@@ -197,14 +348,31 @@ def main():
         print(f"Error: {e}")
         sys.exit(1)
     finally:
-        # Cleanup temporary audio file
-        if not args.keep_audio and os.path.exists(temp_audio_path):
-            os.remove(temp_audio_path)
-            print("Temporary audio file removed")
+        # Cleanup temporary audio files
+        if not args.keep_audio:
+            if os.path.exists(temp_audio_path):
+                os.remove(temp_audio_path)
+            if os.path.exists(temp_processed_path):
+                os.remove(temp_processed_path)
+            print("Temporary audio files removed")
         elif args.keep_audio:
-            audio_output = video_path.with_suffix('.wav')
-            os.rename(temp_audio_path, audio_output)
-            print(f"Audio file saved to: {audio_output}")
+            # Save the preprocessed audio if preprocessing was used, otherwise save original
+            if args.preprocess and os.path.exists(temp_processed_path):
+                audio_output = video_path.with_suffix('_processed.wav')
+                os.rename(temp_processed_path, audio_output)
+                print(f"Preprocessed audio file saved to: {audio_output}")
+                # Also save original if it exists
+                if os.path.exists(temp_audio_path):
+                    original_output = video_path.with_suffix('_original.wav')
+                    os.rename(temp_audio_path, original_output)
+                    print(f"Original audio file saved to: {original_output}")
+            elif os.path.exists(temp_audio_path):
+                audio_output = video_path.with_suffix('.wav')
+                os.rename(temp_audio_path, audio_output)
+                print(f"Audio file saved to: {audio_output}")
+                # Clean up processed if it exists
+                if os.path.exists(temp_processed_path):
+                    os.remove(temp_processed_path)
 
 
 if __name__ == "__main__":
